@@ -96,10 +96,13 @@ class FridayService : Service(), TextToSpeech.OnInitListener {
     fun say(t: String) { speak(t) }
 
     private fun speak(t: String) {
-        main.post {
-            speaking = true
-            sr?.cancel()
-            tts?.speak(t.ifBlank { "சரி" }, TextToSpeech.QUEUE_FLUSH, null, "f")
+        val text = t.ifBlank { "சரி" }
+        speaking = true
+        main.post { sr?.cancel() }
+        thread {
+            val ok = Voice.speak(this, text)      // Jarvis குரல்
+            if (ok) { speaking = false; lastActive = System.currentTimeMillis(); listen() }
+            else main.post { tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "f") }   // fallback: phone குரல்
         }
     }
 

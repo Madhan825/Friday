@@ -28,4 +28,19 @@ class Prefs(ctx: Context) {
             val v = p[1].split(",")
             p[0].trim().lowercase() to (v[0].trim() to v.getOrNull(1)?.trim())
         }.toMap()
+
+    // வேலை செய்த model-ஐ நினைவில வச்சுக்கும்
+    var workingModel: String
+        get() = sp.getString("wm", "") ?: ""
+        set(v) = sp.edit().putString("wm", v).apply()
+    var ttsModel: String
+        get() = sp.getString("ttsm", "") ?: ""
+        set(v) = sp.edit().putString("ttsm", v).apply()
+    // Jarvis குரல்: Charon (ஆழமான, அமைதியான). மாற்ற: Orus, Algenib, Iapetus, Alnilam
+    var voice: String
+        get() = sp.getString("voice", "Charon") ?: "Charon"
+        set(v) = sp.edit().putString("voice", v).apply()
+    var lastError: String
+        get() = sp.getString("lasterr", "") ?: ""
+        set(v) = sp.edit().putString("lasterr", v).apply()
 }

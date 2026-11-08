@@ -9,19 +9,52 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 object Gemini {
-    // Google Gemini REST call. பிழை வந்தா null திரும்பும்.
-    fun call(p: Prefs, body: JSONObject): String? = try {
-        val c = URL("https://generativelanguage.googleapis.com/v1beta/models/${p.model}:generateContent").openConnection() as HttpURLConnection
-        c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 60000; c.doOutput = true
-        c.setRequestProperty("Content-Type", "application/json")
-        c.setRequestProperty("x-goog-api-key", p.geminiKey)
-        c.outputStream.use { it.write(body.toString().toByteArray()) }
-        val txt = (if (c.responseCode in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
-        if (c.responseCode !in 200..299) null else {
-            val parts = JSONObject(txt).getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts")
-            (0 until parts.length()).joinToString("") { parts.getJSONObject(it).optString("text") }
+    @Volatile var lastError = ""
+    // 2.5 model-கள் நிறுத்தப்பட்டிருக்கலாம், அதனால புதுசிலிருந்து பழசுக்கு வரிசையா முயற்சிக்கும்
+    val FLASH = listOf("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash")
+    val SMART = listOf("gemini-3.1-pro-preview", "gemini-2.5-pro")
+
+    private class R(val code: Int, val text: String, val msg: String)
+
+    private fun post(key: String, model: String, body: JSONObject): R {
+        return try {
+            val c = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent").openConnection() as HttpURLConnection
+            c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 90000; c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("x-goog-api-key", key)
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = c.responseCode
+            val txt = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
+            if (code in 200..299) {
+                val cands = JSONObject(txt).optJSONArray("candidates")
+                val parts = cands?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                val out = if (parts == null) "" else (0 until parts.length()).joinToString("") { parts.getJSONObject(it).optString("text") }
+                R(code, out, "")
+            } else {
+                val m = try { JSONObject(txt).getJSONObject("error").optString("message") } catch (e: Exception) { txt.take(100) }
+                R(code, "", m)
+            }
+        } catch (e: Exception) { R(-1, "", e.javaClass.simpleName + " " + (e.message ?: "")) }
+    }
+
+    // smart=true → பெரிய (Pro) model முதல்ல. பிழைனா அடுத்த model. எல்லாம் தோத்தா null.
+    fun call(p: Prefs, body: JSONObject, smart: Boolean = false): String? {
+        val base = if (smart) SMART + FLASH else FLASH
+        val order = (listOf(p.workingModel, p.model).filter { it.isNotBlank() && !smart } + base).distinct()
+        for (m in order) {
+            var b = body
+            var r = post(p.geminiKey, m, b)
+            if (r.code == 400 && b.has("tools")) {          // சில model-ல search tool பிரச்சனைனா அது இல்லாம
+                b = JSONObject(b.toString()); b.remove("tools")
+                r = post(p.geminiKey, m, b)
+            }
+            if (r.code in 200..299) { if (!smart) p.workingModel = m; p.lastError = ""; lastError = ""; return r.text }
+            lastError = r.code.toString() + " " + m + ": " + r.msg
+            p.lastError = lastError
+            if (r.code == 401 || r.code == 403 || (r.code == 400 && r.msg.contains("API key", true))) return null  // key தவறு
         }
-    } catch (e: Exception) { null }
+        return null
+    }
 }
 
 data class Reply(val speak: String, val actions: List<JSONObject>)
@@ -41,7 +74,11 @@ object Brain {
             .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt(ctx, mem)))))
             .put("contents", contents)
             .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject()))) // தெரியாததை Google-ல தேடும்
-        val raw = Gemini.call(p, body) ?: return Reply("இப்போ இன்டர்நெட் அல்லது API-ல பிரச்சனை இருக்கு", emptyList())
+        val smart = user.length > 70 || Regex("explain|plan|compare|difference|solve|code|விளக்கு|வித்தியாசம்|திட்டம்", RegexOption.IGNORE_CASE).containsMatchIn(user)
+        val raw = Gemini.call(p, body, smart) ?: return Reply(
+            if (Gemini.lastError.startsWith("401") || Gemini.lastError.startsWith("403") || Gemini.lastError.contains("API key", true))
+                "உங்க API key சரியில்லை போல இருக்கு. App-ல மறுபடி paste பண்ணுங்க"
+            else "Gemini-ல பிரச்சனை. error " + Gemini.lastError.take(40), emptyList())
 
         val actions = mutableListOf<JSONObject>(); val speak = StringBuilder()
         raw.lines().forEach { l ->
@@ -65,6 +102,8 @@ object Brain {
         val devices = Prefs(ctx).devices().keys.joinToString(", ").ifBlank { "none" }
         return """
 நீ "Friday" - Iron Man-ல வர்ற மாதிரியான user-ஓட personal AI assistant, அவரோட Android phone-ல இருக்க.
+குணம்: Iron Man-ஓட JARVIS மாதிரி - அமைதியா, மரியாதையா, நாசூக்கான சின்ன நகைச்சுவையோட பேசு; அளவா "Sir" ன்னு அழை.
+யோசிக்கும் முறை: சிக்கலான கேள்வின்னா மனசுக்குள்ள படிப்படியா யோசி, தேவைன்னா Google-ல சரிபார்த்து, சரியான பதிலை சுருக்கமா சொல்லு. தெரியலைன்னா ஊகிக்காம தெரியலைன்னு சொல்லு.
 மொழி: user பேசுற மாதிரியே (Tamil / Tanglish / English) பதில் சொல்லு. பதில் குரல்ல படிக்கப்படும், அதனால சின்னதா, இயல்பா, emoji/markdown இல்லாம.
 தெரியாத அல்லது புதிய தகவலுக்கு Google Search பயன்படுத்தி கத்துக்கிட்டு சொல்லு.
 வேலை சொன்னா செய்: பதிலுக்குப் பிறகு தனி வரியா ACTION: {json} எழுது (பல வரி இருக்கலாம்). User பத்தி முக்கியமானது (பேரு, விருப்பம், plan) தெரிஞ்சா தனி வரியா REMEMBER: <விஷயம்> எழுது.

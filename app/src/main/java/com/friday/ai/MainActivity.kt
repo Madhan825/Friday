@@ -21,18 +21,20 @@ class MainActivity : Activity() {
         label("Friday AI"); label("Google (Gemini) API key")
         val key = edit(p.geminiKey, "AIza...")
         label("Model (மாத்தணும்னா)"); val model = edit(p.model, "gemini-2.5-flash")
+        label("குரல் (Charon, Orus, Algenib, Iapetus, Alnilam)"); val voice = edit(p.voice, "Charon")
         label("மற்ற devices (ஒரு வரிக்கு ஒன்னு: name=ip அல்லது name=ip,MAC)")
         val dev = edit(p.devicesRaw, "tv=192.168.1.5\npc=192.168.1.8,AA:BB:CC:DD:EE:FF", 4)
         label("இந்த phone-ஓட device token: ${p.token}")
 
-        btn("Save") { p.geminiKey = key.text.toString(); p.model = model.text.toString(); p.devicesRaw = dev.text.toString(); toast("Saved") }
+        label("கடைசி error: " + p.lastError.ifBlank { "இல்லை" })
+        btn("Save") { p.geminiKey = key.text.toString(); p.model = model.text.toString(); p.voice = voice.text.toString().ifBlank { "Charon" }; p.devicesRaw = dev.text.toString(); toast("Saved") }
         btn("1) Permissions கொடு") {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CALL_PHONE,
                 Manifest.permission.READ_CONTACTS, Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         btn("2) Accessibility ON பண்ணு (tap/type control)") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         btn("3) Battery restriction நீக்கு") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-        btn("START Friday") { p.geminiKey = key.text.toString(); p.model = model.text.toString(); p.devicesRaw = dev.text.toString()
+        btn("START Friday") { p.geminiKey = key.text.toString(); p.model = model.text.toString(); p.voice = voice.text.toString().ifBlank { "Charon" }; p.devicesRaw = dev.text.toString()
             startForegroundService(Intent(this, FridayService::class.java)); toast("Friday ஆரம்பம்! 'Friday' ன்னு கூப்பிடுங்க") }
         btn("STOP") { stopService(Intent(this, FridayService::class.java)) }
 
