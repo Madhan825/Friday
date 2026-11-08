@@ -1,6 +1,9 @@
 package com.friday.ai
 
 import android.content.Context
+import android.util.Base64
+import kotlin.concurrent.thread
+import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -55,9 +58,27 @@ object Gemini {
         } catch (e: Exception) { emptyList() }
     }
 
+    // Live (நேரடி குரல்) model-கள்
+    fun discoverLive(key: String): List<String> {
+        return try {
+            val c = URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200").openConnection() as HttpURLConnection
+            c.connectTimeout = 15000; c.readTimeout = 30000
+            c.setRequestProperty("x-goog-api-key", key)
+            if (c.responseCode !in 200..299) return emptyList()
+            val arr = JSONObject(c.inputStream.bufferedReader().readText()).optJSONArray("models") ?: return emptyList()
+            (0 until arr.length()).map { arr.getJSONObject(it) }
+                .filter { it.optJSONArray("supportedGenerationMethods")?.toString()?.contains("bidiGenerateContent") == true }
+                .map { it.getString("name").removePrefix("models/") }
+                .filter { (it.contains("live") || it.contains("native-audio")) && !it.contains("translate") }
+                .sortedWith(compareByDescending<String> { Regex("gemini-(\\d+(?:\\.\\d+)?)").find(it)?.groupValues?.get(1)?.toDouble() ?: 0.0 }
+                    .thenBy { it.contains("preview") })
+        } catch (e: Exception) { emptyList() }
+    }
+
     fun call(p: Prefs, body: JSONObject, smart: Boolean = false): String? {
         val base = if (smart) SMART + FLASH else FLASH
-        val first = (listOf(p.workingModel, p.model).filter { it.isNotBlank() && !smart } + base).distinct()
+        val userModel = if (p.model.trim() == "gemini-2.5-flash") "" else p.model
+        val first = (listOf(p.workingModel, userModel).filter { it.isNotBlank() && !smart } + base).distinct()
         val errs = mutableListOf<String>()
         val tried = HashSet<String>()
         var fatal = false
@@ -80,13 +101,95 @@ object Gemini {
         p.lastError = lastError
         return null
     }
+
+    // Gemini 3 "thinking" அமைப்பு இல்லாத model-ல 400 வந்தா தானா நிறுத்தும்
+    @Volatile var thinkOk = true
+
+    private class SR(val code: Int, val msg: String, val got: Boolean)
+
+    private fun streamPost(key: String, model: String, body: JSONObject, cancelled: () -> Boolean, onDelta: (String) -> Unit): SR {
+        var got = false
+        return try {
+            val c = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":streamGenerateContent?alt=sse").openConnection() as HttpURLConnection
+            c.requestMethod = "POST"; c.connectTimeout = 15000; c.readTimeout = 90000; c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json")
+            c.setRequestProperty("x-goog-api-key", key)
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = c.responseCode
+            if (code !in 200..299) {
+                val txt = c.errorStream?.bufferedReader()?.readText() ?: ""
+                val m = try { JSONObject(txt).getJSONObject("error").optString("message") } catch (e: Exception) { txt.take(100) }
+                return SR(code, m, false)
+            }
+            c.inputStream.bufferedReader().use { rd ->
+                while (true) {
+                    if (cancelled()) { c.disconnect(); break }
+                    val line = rd.readLine() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val j = try { JSONObject(line.substring(5).trim()) } catch (e: Exception) { continue }
+                    val parts = j.optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts") ?: continue
+                    for (i in 0 until parts.length()) {
+                        val t = parts.getJSONObject(i).optString("text")
+                        if (t.isNotEmpty()) { got = true; onDelta(t) }
+                    }
+                }
+            }
+            SR(200, "", got)
+        } catch (e: Exception) { SR(-1, e.javaClass.simpleName + " " + (e.message ?: ""), got) }
+    }
+
+    // வார்த்தை வார்த்தையா (stream) பதிலை வாங்கும். முதல் வாக்கியம் வந்ததும் பேச ஆரம்பிக்கலாம்.
+    fun stream(p: Prefs, body: JSONObject, smart: Boolean, cancelled: () -> Boolean, onDelta: (String) -> Unit): Boolean {
+        val base = if (smart) SMART + FLASH else FLASH
+        val first = (listOf(p.workingModel, p.model).filter { it.isNotBlank() && !smart } + base).distinct()
+        val errs = mutableListOf<String>()
+        val tried = HashSet<String>()
+        var fatal = false
+        fun attempt(m: String): Boolean {
+            if (!tried.add(m)) return false
+            val variants = ArrayList<JSONObject>()
+            variants.add(body)
+            var noThink: JSONObject? = null
+            if (body.optJSONObject("generationConfig")?.has("thinkingConfig") == true) {
+                noThink = JSONObject(body.toString()); noThink.getJSONObject("generationConfig").remove("thinkingConfig")
+                variants.add(noThink)
+            }
+            if (body.has("tools")) {
+                val v = JSONObject((noThink ?: body).toString()); v.remove("tools"); variants.add(v)
+            }
+            for ((idx, v) in variants.withIndex()) {
+                val r = streamPost(p.geminiKey, m, v, cancelled, onDelta)
+                if (r.code in 200..299 || r.got) {
+                    if (idx > 0 && noThink != null) thinkOk = false
+                    if (!smart) p.workingModel = m
+                    p.lastError = ""; lastError = ""
+                    return true
+                }
+                errs.add(m.removePrefix("gemini-") + " " + r.code + " " + r.msg.take(60))
+                if (r.msg.contains("API key not valid", true) || r.msg.contains("API_KEY_INVALID", true) || r.msg.contains("expired", true)) { fatal = true; return false }
+                if (r.code != 400) return false
+            }
+            return false
+        }
+        for (m in first) { if (attempt(m)) return true; if (fatal || cancelled()) break }
+        if (!fatal && !cancelled()) for (m in discover(p.geminiKey, smart).take(4)) { if (attempt(m)) return true; if (fatal) break }
+        lastError = errs.joinToString(" | ").take(240)
+        p.lastError = lastError
+        return false
+    }
 }
 
-data class Reply(val speak: String, val actions: List<JSONObject>)
+data class Reply(val speak: String, val actions: List<JSONObject>, val heard: String = "", val ignored: Boolean = false)
 
 object Brain {
-    // AI brain: உரையாடல் + நினைவு + Google Search + செயல்கள் (ACTION)
-    fun ask(ctx: Context, user: String): Reply {
+    val WAKE = Regex("friday|fry day|ஃப்ரைடே|ஃபிரைடே|ப்ரைடே|பிரைடே|ஃப்ரைடை", RegexOption.IGNORE_CASE)
+
+    private const val AUDIO_NOTE = "The user's message is the attached audio, recorded by an always-on phone microphone (may contain background noise or other people). " +
+        "Focus on the main, closest speaker. FIRST output one line: HEARD: <what they said, Tamil in Tamil script, English as English>. " +
+        "If there is no clear speech meant for you, output only: HEARD: IGNORE. Otherwise continue with your normal reply (1-2 short sentences) and any ACTION / REMEMBER lines."
+
+    // AI brain: உரையாடல் + நினைவு + Google Search + செயல்கள் (ACTION). audio இருந்தா குரலை நேரடியா புரிஞ்சுக்கும் (ஒரே call)
+    fun ask(ctx: Context, user: String, audio: ByteArray? = null, needWake: Boolean = false): Reply {
         val p = Prefs(ctx)
         if (p.geminiKey.isBlank()) return Reply("முதல்ல app-ல Google API key போடுங்க", emptyList())
         val mem = Memory(ctx)
@@ -94,30 +197,172 @@ object Brain {
         mem.history().takeLast(24).forEach {
             contents.put(JSONObject().put("role", it.role).put("parts", JSONArray().put(JSONObject().put("text", it.text))))
         }
-        contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user))))
+        val parts = JSONArray()
+        if (audio == null) parts.put(JSONObject().put("text", user)) else {
+            parts.put(JSONObject().put("text", AUDIO_NOTE))
+            parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", Base64.encodeToString(audio, Base64.NO_WRAP))))
+        }
+        contents.put(JSONObject().put("role", "user").put("parts", parts))
         val body = JSONObject()
             .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt(ctx, mem)))))
             .put("contents", contents)
-            .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject()))) // தெரியாததை Google-ல தேடும்
-        val smart = user.length > 70 || Regex("explain|plan|compare|difference|solve|code|விளக்கு|வித்தியாசம்|திட்டம்", RegexOption.IGNORE_CASE).containsMatchIn(user)
+            .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+        val smart = audio == null && (user.length > 70 || Regex("explain|plan|compare|difference|solve|code|விளக்கு|வித்தியாசம்|திட்டம்", RegexOption.IGNORE_CASE).containsMatchIn(user))
         val raw = Gemini.call(p, body, smart) ?: return Reply(
             if (Gemini.lastError.contains("API key", true))
                 "உங்க API key சரியில்லை போல இருக்கு. App-ல மறுபடி paste பண்ணுங்க"
             else "Gemini-ல பிரச்சனை: " + Gemini.lastError.take(90), emptyList())
 
-        val actions = mutableListOf<JSONObject>(); val speak = StringBuilder()
+        val actions = mutableListOf<JSONObject>(); val facts = mutableListOf<String>(); val speak = StringBuilder()
+        var heard = user
         raw.lines().forEach { l ->
             val t = l.trim()
             when {
+                t.startsWith("HEARD:") -> heard = t.removePrefix("HEARD:").trim()
                 t.startsWith("ACTION:") -> try { actions.add(JSONObject(t.removePrefix("ACTION:").trim())) } catch (_: Exception) {}
-                t.startsWith("REMEMBER:") -> mem.addFact(t.removePrefix("REMEMBER:").trim())
+                t.startsWith("REMEMBER:") -> facts.add(t.removePrefix("REMEMBER:").trim())
                 else -> speak.append(t.replace("*", "")).append(' ')
             }
         }
+        if (audio != null && (heard.isBlank() || heard.contains("IGNORE", true) || (needWake && !WAKE.containsMatchIn(heard))))
+            return Reply("", emptyList(), heard, true)
         val s = speak.toString().trim()
-        mem.addTurn("user", user); mem.addTurn("model", s)
+        val userText = heard.replace(WAKE, "").trim().ifBlank { heard }
+        facts.forEach { mem.addFact(it) }
+        mem.addTurn("user", userText); mem.addTurn("model", s)
         Thread { mem.compactIfNeeded(ctx) }.start()
-        return Reply(s, actions)
+        return Reply(s, actions, userText)
+    }
+
+    // Live (நேரடி குரல்) முறைக்கான அறிவுறுத்தல்
+    fun liveInstruction(ctx: Context): String {
+        val mem = Memory(ctx)
+        val now = SimpleDateFormat("EEEE, dd MMM yyyy HH:mm", Locale.ENGLISH).format(Date())
+        val last = mem.lastTs()
+        val gap = if (last == 0L) "first conversation" else "last spoke ${(System.currentTimeMillis() - last) / 3600000} hours ago"
+        val devices = Prefs(ctx).devices().keys.joinToString(", ").ifBlank { "none" }
+        return """
+You are "Friday", a JARVIS-like personal AI assistant (like in Iron Man) living on the user's Android phone. Calm, respectful, subtly witty; call the user "Sir" occasionally.
+LANGUAGE: reply in the language the user speaks: Tamil, Tanglish (Tamil written in English style) or English. Use natural spoken Tamil, not bookish Tamil.
+STYLE: you are speaking aloud. Answer immediately in 1-2 short sentences like a human friend. No lists, no markdown. The user may interrupt you at any time: if interrupted, drop what you were saying and answer the new thing.
+The microphone is always on. If the speech you hear is clearly not meant for you (other people talking, TV, music) and you are not in a conversation with the user, stay completely silent.
+Use Google Search whenever you need facts you are not sure about, then answer briefly.
+PHONE CONTROL: to do anything on the phone call phone_action (open_app, youtube_play, web_search, open_url, call, alarm, timer, flashlight, volume, settings, type_text, tap_text, scroll, back, home, send_device, wake_pc, overlay, do_task, stop_task). Give a very short confirmation.
+GUIDE MODE: if the user asks "how do I ...", give exactly ONE short step, then ask them to tell you when done; give the next single step when they say done/next.
+DO-IT-YOURSELF MODE: if the user says "you do it" or "நீயே பண்ணு", say a short okay and call phone_action with action do_task and a complete goal with all details. If they say stop, call stop_task.
+Call remember_fact for important things about the user (name, preferences, plans).
+Connected devices: $devices
+Now: $now ($gap)
+Known about the user: ${mem.facts().joinToString("; ").ifBlank { "nothing yet" }}
+Earlier conversation summary: ${mem.summary().ifBlank { "none" }}
+""".trimIndent()
+    }
+
+
+    interface Sink {
+        fun cancelled(): Boolean
+        fun onHeard(t: String)
+        fun onSentence(s: String)
+        fun onAction(a: JSONObject)
+    }
+
+    // குரலை நேரடியா Gemini-கிட்ட அனுப்பி: கேட்டது + பதில் + செயல்கள் எல்லாம் ஒரே call-ல. பதில் வாக்கியம் வாக்கியமா உடனே வரும்.
+    fun askAudio(ctx: Context, wav: ByteArray, active: Boolean, lastReply: String, sink: Sink): Boolean {
+        val p = Prefs(ctx)
+        if (p.geminiKey.isBlank()) { sink.onSentence("முதல்ல app-ல Google API key போடுங்க"); return true }
+        val mem = Memory(ctx)
+        val contents = JSONArray()
+        mem.history().takeLast(16).forEach {
+            contents.put(JSONObject().put("role", it.role).put("parts", JSONArray().put(JSONObject().put("text", it.text))))
+        }
+        val instr = "STATE: " + (if (active) "active (conversation going on)" else "idle (needs wake word 'Friday')") + ". " +
+            (if (lastReply.isNotBlank()) "You were just saying: \"" + lastReply.take(200) + "\". " else "") +
+            "Listen to the audio. The owner speaks Tamil, English or Tanglish. Only the main, closest speaker (the owner) counts; ignore other people, TV and music. " +
+            "If STATE is idle, answer only when the owner clearly said the wake word 'Friday'. " +
+            "If the audio is background talk, noise, an echo of your own words, or not meant for you, output exactly: IGNORE. " +
+            "Otherwise: first line 'HEARD: <transcript>', then your spoken reply (1 to 3 short natural sentences like a friend; if the owner interrupted you, respond straight to the interruption), then any ACTION:/REMEMBER: lines."
+        val audio = JSONObject().put("inlineData", JSONObject().put("mimeType", "audio/wav").put("data", Base64.encodeToString(wav, Base64.NO_WRAP)))
+        contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", instr)).put(audio)))
+        val gc = JSONObject().put("maxOutputTokens", 600)
+        if (Gemini.thinkOk) gc.put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
+        val body = JSONObject()
+            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt(ctx, mem)))))
+            .put("contents", contents)
+            .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+            .put("generationConfig", gc)
+        val parser = Parser(sink, mem)
+        val ok = Gemini.stream(p, body, false, { sink.cancelled() }) { d -> parser.feed(d) }
+        parser.finish()
+        if (ok && !parser.ignored && !sink.cancelled() && parser.spoken.isNotBlank()) {
+            mem.addTurn("user", parser.heard.ifBlank { "(voice)" })
+            mem.addTurn("model", parser.spoken.toString().trim())
+            thread { mem.compactIfNeeded(ctx) }
+        }
+        return ok
+    }
+
+    private class Parser(val sink: Sink, val mem: Memory) {
+        private val lb = StringBuilder()
+        var ignored = false
+        var heard = ""
+        val spoken = StringBuilder()
+        private var emitted = 0
+        private val tags = listOf("HEARD:", "ACTION:", "REMEMBER:", "IGNORE")
+
+        fun feed(d: String) {
+            lb.append(d)
+            while (true) {
+                val i = lb.indexOf("\n")
+                if (i < 0) break
+                val line = lb.substring(0, i)
+                lb.delete(0, i + 1)
+                line(line)
+            }
+            partial()
+        }
+
+        fun finish() { if (lb.isNotBlank()) { line(lb.toString()); lb.setLength(0) } }
+
+        private fun line(raw: String) {
+            val t = raw.trim()
+            if (t.isEmpty()) return
+            when {
+                t.startsWith("IGNORE") -> ignored = true
+                t.startsWith("HEARD:") -> { heard = t.removePrefix("HEARD:").trim(); sink.onHeard(heard) }
+                t.startsWith("ACTION:") -> try { sink.onAction(JSONObject(t.removePrefix("ACTION:").trim())) } catch (e: Exception) { }
+                t.startsWith("REMEMBER:") -> mem.addFact(t.removePrefix("REMEMBER:").trim())
+                else -> if (!ignored) say(t)
+            }
+        }
+
+        private fun say(raw: String) {
+            val t = raw.replace("*", "").trim()
+            if (t.isEmpty()) return
+            emitted++
+            spoken.append(t).append(' ')
+            sink.onSentence(t)
+        }
+
+        // வரி முடியும் முன்னாடியே, முழு வாக்கியம் வந்ததும் பேச அனுப்பும்
+        private fun partial() {
+            if (ignored) return
+            val s = lb.toString()
+            val t = s.trimStart()
+            if (t.isEmpty()) return
+            if (tags.any { t.startsWith(it) }) return
+            if (t.length < 9 && tags.any { it.startsWith(t) }) return
+            var start = 0
+            var min = if (emitted == 0) 10 else 30
+            for (i in s.indices) {
+                val ch = s[i]
+                if ((ch == '.' || ch == '!' || ch == '?' || ch == '।' || ch == '…') && i + 1 < s.length && s[i + 1].isWhitespace() && i + 1 - start >= min) {
+                    say(s.substring(start, i + 1))
+                    start = i + 1
+                    min = 30
+                }
+            }
+            if (start > 0) lb.delete(0, start)
+        }
     }
 
     private fun systemPrompt(ctx: Context, mem: Memory): String {
@@ -129,6 +374,7 @@ object Brain {
 நீ "Friday" - Iron Man-ல வர்ற மாதிரியான user-ஓட personal AI assistant, அவரோட Android phone-ல இருக்க.
 குணம்: Iron Man-ஓட JARVIS மாதிரி - அமைதியா, மரியாதையா, நாசூக்கான சின்ன நகைச்சுவையோட பேசு; அளவா "Sir" ன்னு அழை.
 யோசிக்கும் முறை: சிக்கலான கேள்வின்னா மனசுக்குள்ள படிப்படியா யோசி, தேவைன்னா Google-ல சரிபார்த்து, சரியான பதிலை சுருக்கமா சொல்லு. தெரியலைன்னா ஊகிக்காம தெரியலைன்னு சொல்லு.
+நடத்தை: ஒரு நண்பன் பேசுற மாதிரி இயல்பா, நேரடியா பதில் சொல்லு; 1-3 சின்ன வாக்கியம்; முன்னுரை, நீண்ட விளக்கம் வேண்டாம். User நடுவுல குறுக்கிட்டா அவர் புதுசா கேட்டதுக்கு நேரா பதில் சொல்லு, முன்னாடி சொன்னதை திரும்பச் சொல்லாதே.
 மொழி: user பேசுற மாதிரியே (Tamil / Tanglish / English) பதில் சொல்லு. பதில் குரல்ல படிக்கப்படும், அதனால சின்னதா, இயல்பா, emoji/markdown இல்லாம.
 தெரியாத அல்லது புதிய தகவலுக்கு Google Search பயன்படுத்தி கத்துக்கிட்டு சொல்லு.
 வேலை சொன்னா செய்: பதிலுக்குப் பிறகு தனி வரியா ACTION: {json} எழுது (பல வரி இருக்கலாம்). User பத்தி முக்கியமானது (பேரு, விருப்பம், plan) தெரிஞ்சா தனி வரியா REMEMBER: <விஷயம்> எழுது.

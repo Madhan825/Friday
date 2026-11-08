@@ -11,7 +11,7 @@ class Prefs(ctx: Context) {
         set(v) = sp.edit().putString("key", v.trim()).apply()
     // Model பேரு மாறினா இங்கே மாத்திக்கோங்க
     var model: String
-        get() = sp.getString("model", "gemini-2.5-flash") ?: "gemini-2.5-flash"
+        get() = sp.getString("model", "") ?: ""
         set(v) = sp.edit().putString("model", v.trim()).apply()
     var devicesRaw: String
         get() = sp.getString("devices", "") ?: ""
@@ -47,4 +47,15 @@ class Prefs(ctx: Context) {
     var overlayOn: Boolean
         get() = sp.getBoolean("overlay", true)
         set(v) = sp.edit().putBoolean("overlay", v).apply()
+
+    var useLive: Boolean
+        get() = sp.getBoolean("uselive", true)
+        set(v) = sp.edit().putBoolean("uselive", v).apply()
+    // குறுக்கிடும் உணர்திறன்: 1 குறைவு, 2 நடுத்தரம், 3 அதிகம்
+    var bargeIn: Int
+        get() = sp.getInt("barge", 2)
+        set(v) = sp.edit().putInt("barge", v).apply()
+    var liveModel: String
+        get() = sp.getString("livem", "") ?: ""
+        set(v) = sp.edit().putString("livem", v).apply()
 }
