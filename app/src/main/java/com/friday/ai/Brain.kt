@@ -10,7 +10,6 @@ import java.util.*
 
 object Gemini {
     @Volatile var lastError = ""
-    // 2.5 model-கள் நிறுத்தப்பட்டிருக்கலாம், அதனால புதுசிலிருந்து பழசுக்கு வரிசையா முயற்சிக்கும்
     val FLASH = listOf("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash")
     val SMART = listOf("gemini-3.1-pro-preview", "gemini-2.5-pro")
 
@@ -37,22 +36,48 @@ object Gemini {
         } catch (e: Exception) { R(-1, "", e.javaClass.simpleName + " " + (e.message ?: "")) }
     }
 
-    // smart=true → பெரிய (Pro) model முதல்ல. பிழைனா அடுத்த model. எல்லாம் தோத்தா null.
+    // உங்க API key-க்கு Google உண்மையில அனுமதிக்கிற model-களை புதுசு முதல்ல வரிசைப்படுத்தி தரும்
+    private fun discover(key: String, smart: Boolean): List<String> {
+        return try {
+            val c = URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200").openConnection() as HttpURLConnection
+            c.connectTimeout = 15000; c.readTimeout = 30000
+            c.setRequestProperty("x-goog-api-key", key)
+            if (c.responseCode !in 200..299) return emptyList()
+            val arr = JSONObject(c.inputStream.bufferedReader().readText()).optJSONArray("models") ?: return emptyList()
+            val skip = Regex("tts|image|live|audio|embedding|robotics|translate|omni|lite|computer|learnlm")
+            val want = if (smart) "pro" else "flash"
+            val names = (0 until arr.length()).map { arr.getJSONObject(it) }
+                .filter { it.optJSONArray("supportedGenerationMethods")?.toString()?.contains("generateContent") == true }
+                .map { it.getString("name").removePrefix("models/") }
+                .filter { it.startsWith("gemini-") && it.contains(want) && !skip.containsMatchIn(it) }
+            names.sortedWith(compareByDescending<String> { Regex("gemini-(\\d+(?:\\.\\d+)?)").find(it)?.groupValues?.get(1)?.toDouble() ?: 0.0 }
+                .thenBy { it.contains("preview") || it.contains("exp") })
+        } catch (e: Exception) { emptyList() }
+    }
+
     fun call(p: Prefs, body: JSONObject, smart: Boolean = false): String? {
         val base = if (smart) SMART + FLASH else FLASH
-        val order = (listOf(p.workingModel, p.model).filter { it.isNotBlank() && !smart } + base).distinct()
-        for (m in order) {
+        val first = (listOf(p.workingModel, p.model).filter { it.isNotBlank() && !smart } + base).distinct()
+        val errs = mutableListOf<String>()
+        val tried = HashSet<String>()
+        var fatal = false
+        fun attempt(m: String): String? {
+            if (!tried.add(m)) return null
             var b = body
             var r = post(p.geminiKey, m, b)
-            if (r.code == 400 && b.has("tools")) {          // சில model-ல search tool பிரச்சனைனா அது இல்லாம
+            if (r.code == 400 && b.has("tools")) {
                 b = JSONObject(b.toString()); b.remove("tools")
                 r = post(p.geminiKey, m, b)
             }
             if (r.code in 200..299) { if (!smart) p.workingModel = m; p.lastError = ""; lastError = ""; return r.text }
-            lastError = r.code.toString() + " " + m + ": " + r.msg
-            p.lastError = lastError
-            if (r.code == 401 || r.code == 403 || (r.code == 400 && r.msg.contains("API key", true))) return null  // key தவறு
+            errs.add(m.removePrefix("gemini-") + " " + r.code + " " + r.msg.take(60))
+            if (r.msg.contains("API key not valid", true) || r.msg.contains("API_KEY_INVALID", true) || r.msg.contains("expired", true)) fatal = true
+            return null
         }
+        for (m in first) { val t = attempt(m); if (t != null) return t; if (fatal) break }
+        if (!fatal) for (m in discover(p.geminiKey, smart).take(4)) { val t = attempt(m); if (t != null) return t; if (fatal) break }
+        lastError = errs.joinToString(" | ").take(240)
+        p.lastError = lastError
         return null
     }
 }
@@ -76,9 +101,9 @@ object Brain {
             .put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject()))) // தெரியாததை Google-ல தேடும்
         val smart = user.length > 70 || Regex("explain|plan|compare|difference|solve|code|விளக்கு|வித்தியாசம்|திட்டம்", RegexOption.IGNORE_CASE).containsMatchIn(user)
         val raw = Gemini.call(p, body, smart) ?: return Reply(
-            if (Gemini.lastError.startsWith("401") || Gemini.lastError.startsWith("403") || Gemini.lastError.contains("API key", true))
+            if (Gemini.lastError.contains("API key", true))
                 "உங்க API key சரியில்லை போல இருக்கு. App-ல மறுபடி paste பண்ணுங்க"
-            else "Gemini-ல பிரச்சனை. error " + Gemini.lastError.take(40), emptyList())
+            else "Gemini-ல பிரச்சனை: " + Gemini.lastError.take(90), emptyList())
 
         val actions = mutableListOf<JSONObject>(); val speak = StringBuilder()
         raw.lines().forEach { l ->
@@ -112,7 +137,7 @@ ACTION வகைகள்:
 {"action":"call","to":"contact name or number"} | {"action":"alarm","hour":6,"minute":30,"label":"..."} | {"action":"timer","seconds":300}
 {"action":"flashlight","on":true} | {"action":"volume","dir":"up|down|mute"} | {"action":"settings","page":"wifi|bluetooth|display|sound|main"}
 {"action":"type_text","text":"..."} | {"action":"tap_text","text":"button label"} | {"action":"scroll","dir":"down|up"} | {"action":"back"} | {"action":"home"}
-{"action":"send_device","device":"name","command":"natural language command"} | {"action":"wake_pc","device":"name"}
+{"action":"send_device","device":"name","command":"natural language command"} | {"action":"wake_pc","device":"name"} | {"action":"overlay","on":true}
 வழிகாட்டி முறை: user "இதை எப்படி பண்றது" ன்னு கேட்டா ஒரே ஒரு step மட்டும் சின்னதா தெளிவா சொல்லு, கடைசியா "முடிஞ்சதும் சொல்லுங்க" ன்னு சொல்லு. User "முடிஞ்சது / அடுத்து / next" சொன்னா அடுத்த ஒரே step. எந்த step-ல இருக்கோம்ன்னு உரையாடல்ல இருந்து நினைவில வச்சுக்கோ. User சிக்கல் சொன்னா அதை சரி பண்ற step சொல்லு.
 தானே செய்யும் முறை: user "நீயே பண்ணு / நீயே பண்றியா / do it for you" சொன்னா, "சரி, நானே பண்றேன்" ன்னு சொல்லிட்டு ACTION: {"action":"do_task","goal":"<முழு இலக்கு, விவரங்களோட>"} எழுது. நடுவுல நிறுத்தச் சொன்னா ACTION: {"action":"stop_task"}.
 இணைக்கப்பட்ட devices: $devices

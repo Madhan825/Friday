@@ -43,4 +43,8 @@ class Prefs(ctx: Context) {
     var lastError: String
         get() = sp.getString("lasterr", "") ?: ""
         set(v) = sp.edit().putString("lasterr", v).apply()
+
+    var overlayOn: Boolean
+        get() = sp.getBoolean("overlay", true)
+        set(v) = sp.edit().putBoolean("overlay", v).apply()
 }

@@ -34,6 +34,8 @@ class MainActivity : Activity() {
         }
         btn("2) Accessibility ON பண்ணு (tap/type control)") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         btn("3) Battery restriction நீக்கு") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        btn("4) Screen text அனுமதி (மற்ற ஆப் மேல காட்ட)") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:" + packageName))) }
+        btn("Screen text ON / OFF") { p.overlayOn = !p.overlayOn; Overlay.setEnabled(this, p.overlayOn); toast(if (p.overlayOn) "Text ON" else "Text OFF") }
         btn("START Friday") { p.geminiKey = key.text.toString(); p.model = model.text.toString(); p.voice = voice.text.toString().ifBlank { "Charon" }; p.devicesRaw = dev.text.toString()
             startForegroundService(Intent(this, FridayService::class.java)); toast("Friday ஆரம்பம்! 'Friday' ன்னு கூப்பிடுங்க") }
         btn("STOP") { stopService(Intent(this, FridayService::class.java)) }
