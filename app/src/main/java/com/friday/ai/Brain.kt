@@ -3,7 +3,6 @@ package com.friday.ai
 import android.content.Context
 import android.util.Base64
 import kotlin.concurrent.thread
-import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -314,9 +313,9 @@ Earlier conversation summary: ${mem.summary().ifBlank { "none" }}
             while (true) {
                 val i = lb.indexOf("\n")
                 if (i < 0) break
-                val line = lb.substring(0, i)
+                val ln = lb.substring(0, i)
                 lb.delete(0, i + 1)
-                line(line)
+                line(ln)
             }
             partial()
         }
