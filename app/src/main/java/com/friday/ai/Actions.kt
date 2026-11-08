@@ -53,6 +53,8 @@ object Actions {
             "scroll" -> FridayAccessibility.instance?.scroll(a.optString("dir") != "up")
             "back" -> FridayAccessibility.instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
             "home" -> FridayAccessibility.instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+            "do_task" -> (ctx as? FridayService)?.let { Agent.start(it, a.optString("goal")) }
+            "stop_task" -> Agent.running = false
             "send_device" -> thread { DeviceLink.send(ctx, a.optString("device"), a.optString("command")) }
             "wake_pc" -> thread { DeviceLink.wake(ctx, a.optString("device")) }
         }

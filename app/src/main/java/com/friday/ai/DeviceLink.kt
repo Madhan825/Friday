@@ -28,24 +28,35 @@ object DeviceLink {
         return sb.toString("UTF-8")
     }
 
-    private fun handle(svc: FridayService, c: Socket) = c.use {
-        val i = c.getInputStream()
-        readLine(i) ?: return
-        var len = 0; var tok = ""
-        while (true) {
-            val l = readLine(i) ?: break
-            if (l.isEmpty()) break
-            val low = l.lowercase()
-            if (low.startsWith("content-length:")) len = l.substring(15).trim().toInt()
-            if (low.startsWith("x-token:")) tok = l.substring(8).trim()
-        }
-        val buf = ByteArray(len); var r = 0
-        while (r < len) { val n = i.read(buf, r, len - r); if (n < 0) break; r += n }
-        val reply = if (tok != Prefs(svc).token) "unauthorized" else svc.process(String(buf, 0, r, Charsets.UTF_8))
-        val b = reply.toByteArray()
-        c.getOutputStream().apply {
-            write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${b.size}\r\n\r\n".toByteArray())
-            write(b); flush()
+    private fun handle(svc: FridayService, c: Socket) {
+        try {
+            val i = c.getInputStream()
+            if (readLine(i) == null) return
+            var len = 0
+            var tok = ""
+            while (true) {
+                val l = readLine(i) ?: break
+                if (l.isEmpty()) break
+                val low = l.lowercase()
+                if (low.startsWith("content-length:")) len = l.substring(15).trim().toInt()
+                if (low.startsWith("x-token:")) tok = l.substring(8).trim()
+            }
+            val buf = ByteArray(len)
+            var r = 0
+            while (r < len) {
+                val n = i.read(buf, r, len - r)
+                if (n < 0) break
+                r += n
+            }
+            val reply: String = if (tok != Prefs(svc).token) "unauthorized" else svc.process(String(buf, 0, r, Charsets.UTF_8))
+            val b = reply.toByteArray()
+            val o = c.getOutputStream()
+            o.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + b.size + "\r\n\r\n").toByteArray())
+            o.write(b)
+            o.flush()
+        } catch (e: Exception) {
+        } finally {
+            try { c.close() } catch (e: Exception) {}
         }
     }
 

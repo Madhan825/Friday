@@ -51,4 +51,45 @@ class FridayAccessibility : AccessibilityService() {
         val s = dfs(rootInActiveWindow) ?: return false
         return s.performAction(if (down) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
     }
+
+    // ---- Agent-க்கான கூடுதல் வசதிகள் ----
+    private var nodes: List<AccessibilityNodeInfo> = emptyList()
+
+    fun currentPackage(): String = rootInActiveWindow?.packageName?.toString() ?: ""
+
+    // திரையில இருக்கிறதை எண்ணிட்ட பட்டியலா தரும்
+    fun dumpScreen(): String {
+        val out = StringBuilder()
+        val list = mutableListOf<AccessibilityNodeInfo>()
+        fun walk(n: AccessibilityNodeInfo?) {
+            if (n == null || list.size >= 70) return
+            val t = n.text?.toString()?.take(60) ?: ""
+            val d = n.contentDescription?.toString()?.take(60) ?: ""
+            if (n.isVisibleToUser && (t.isNotEmpty() || d.isNotEmpty() || n.isClickable || n.isEditable)) {
+                out.append("[").append(list.size).append("] ")
+                out.append(if (n.isEditable) "INPUT " else if (n.isClickable) "BTN " else "TXT ")
+                out.append(t)
+                if (d.isNotEmpty() && d != t) out.append(" | ").append(d)
+                if (n.isPassword) out.append(" (PASSWORD)")
+                out.append('\n')
+                list.add(n)
+            }
+            for (i in 0 until n.childCount) walk(n.getChild(i))
+        }
+        walk(rootInActiveWindow)
+        nodes = list
+        return out.toString()
+    }
+
+    fun tapIndex(i: Int): Boolean {
+        val n = nodes.getOrNull(i) ?: return false
+        return clickUp(n)
+    }
+
+    fun typeIndex(i: Int, text: String): Boolean {
+        val n = nodes.getOrNull(i) ?: return false
+        n.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val b = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
+        return n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b)
+    }
 }

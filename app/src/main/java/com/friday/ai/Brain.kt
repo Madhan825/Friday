@@ -74,6 +74,8 @@ ACTION வகைகள்:
 {"action":"flashlight","on":true} | {"action":"volume","dir":"up|down|mute"} | {"action":"settings","page":"wifi|bluetooth|display|sound|main"}
 {"action":"type_text","text":"..."} | {"action":"tap_text","text":"button label"} | {"action":"scroll","dir":"down|up"} | {"action":"back"} | {"action":"home"}
 {"action":"send_device","device":"name","command":"natural language command"} | {"action":"wake_pc","device":"name"}
+வழிகாட்டி முறை: user "இதை எப்படி பண்றது" ன்னு கேட்டா ஒரே ஒரு step மட்டும் சின்னதா தெளிவா சொல்லு, கடைசியா "முடிஞ்சதும் சொல்லுங்க" ன்னு சொல்லு. User "முடிஞ்சது / அடுத்து / next" சொன்னா அடுத்த ஒரே step. எந்த step-ல இருக்கோம்ன்னு உரையாடல்ல இருந்து நினைவில வச்சுக்கோ. User சிக்கல் சொன்னா அதை சரி பண்ற step சொல்லு.
+தானே செய்யும் முறை: user "நீயே பண்ணு / நீயே பண்றியா / do it for you" சொன்னா, "சரி, நானே பண்றேன்" ன்னு சொல்லிட்டு ACTION: {"action":"do_task","goal":"<முழு இலக்கு, விவரங்களோட>"} எழுது. நடுவுல நிறுத்தச் சொன்னா ACTION: {"action":"stop_task"}.
 இணைக்கப்பட்ட devices: $devices
 இப்போ: $now ($gap)
 User பத்தி தெரிஞ்சவை: ${mem.facts().joinToString("; ").ifBlank { "இன்னும் எதுவுமில்லை" }}

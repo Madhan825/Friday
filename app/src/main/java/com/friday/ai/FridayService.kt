@@ -48,7 +48,8 @@ class FridayService : Service(), TextToSpeech.OnInitListener {
         listen()
     }
 
-    private fun listen() = main.post {
+    private fun listen() {
+        main.post {
         if (speaking) return@post
         if (sr == null) {
             sr = SpeechRecognizer.createSpeechRecognizer(this).apply { setRecognitionListener(listener) }
@@ -58,9 +59,10 @@ class FridayService : Service(), TextToSpeech.OnInitListener {
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ta-IN")
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
         try { sr?.startListening(i) } catch (_: Exception) { main.postDelayed({ listen() }, 1500) }
+        }
     }
 
-    private val listener = object : RecognitionListener {
+    private val listener: RecognitionListener = object : RecognitionListener {
         override fun onResults(r: Bundle?) {
             val text = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
             if (text.isNullOrBlank()) listen() else handle(text)
@@ -91,9 +93,14 @@ class FridayService : Service(), TextToSpeech.OnInitListener {
         return r.speak
     }
 
-    private fun speak(t: String) = main.post {
-        speaking = true; sr?.cancel()
-        tts?.speak(t.ifBlank { "சரி" }, TextToSpeech.QUEUE_FLUSH, null, "f")
+    fun say(t: String) { speak(t) }
+
+    private fun speak(t: String) {
+        main.post {
+            speaking = true
+            sr?.cancel()
+            tts?.speak(t.ifBlank { "சரி" }, TextToSpeech.QUEUE_FLUSH, null, "f")
+        }
     }
 
     override fun onDestroy() { instance = null; sr?.destroy(); tts?.shutdown() }
