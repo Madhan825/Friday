@@ -41,6 +41,7 @@ class MainActivity : Activity() {
     private lateinit var modelEt: EditText
     private lateinit var devEt: EditText
     private val voiceChips = mutableListOf<Pair<String, TextView>>()
+    private val langChips = mutableListOf<Triple<String, String, TextView>>()
 
     private val BG = 0xFF05070D.toInt()
     private val CARD = 0xFF0F1626.toInt()
@@ -182,7 +183,7 @@ class MainActivity : Activity() {
         ai.addView(testBtn, lp(MATCH, WRAP, 0, 10, 0, 0))
         testTv = tv("", 12f, SUB)
         ai.addView(testTv, lp(MATCH, WRAP, 2, 6, 2, 0))
-        errTv = tv("", 11f, 0xFFF87171.toInt())
+        errTv = tv("", 11f, 0xFFF87171.toInt()).apply { setOnClickListener { p.lastError = ""; Gemini.quotaUntil = 0L } }
         ai.addView(errTv, lp(MATCH, WRAP, 2, 4, 2, 0))
 
         ai.addView(tv("குரல்", 14f, Color.WHITE, true), lp(WRAP, WRAP, 0, 14, 0, 6))
@@ -195,6 +196,17 @@ class MainActivity : Activity() {
         }
         ai.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chipRow) })
         styleChips()
+
+        ai.addView(tv("பேச்சு மொழி", 14f, Color.WHITE, true), lp(WRAP, WRAP, 0, 14, 0, 6))
+        val langRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((code, label) in listOf("tanglish" to "Tanglish", "english" to "English", "tamil" to "தமிழ்")) {
+            val ch = tv(label, 13f, Color.WHITE, true).apply { gravity = Gravity.CENTER; setPadding(dp(14), dp(8), dp(14), dp(8)) }
+            ch.setOnClickListener { p.lang = code; styleLang() }
+            langChips.add(Triple(code, label, ch))
+            langRow.addView(ch, lp(WRAP, WRAP, 0, 0, 8, 0))
+        }
+        ai.addView(langRow)
+        styleLang()
 
         val sw = Switch(this).apply {
             text = "Screen text காட்டு"; setTextColor(Color.WHITE); textSize = 14f; isChecked = p.overlayOn
@@ -225,6 +237,14 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { setBackgroundColor(BG); isVerticalScrollBarEnabled = false; addView(root) })
     }
 
+    private fun styleLang() {
+        for ((code, _, ch) in langChips) {
+            val sel = code == p.lang
+            ch.setTextColor(if (sel) BG else Color.WHITE)
+            ch.background = if (sel) bg(CYAN, 16) else bg(0x18FFFFFF, 16, STROKE)
+        }
+    }
+
     private fun styleChips() {
         for ((name, ch) in voiceChips) {
             val sel = name == p.voice
@@ -241,6 +261,7 @@ class MainActivity : Activity() {
 
     private fun testGemini() {
         saveAll()
+        Gemini.quotaUntil = 0L
         testTv.setTextColor(SUB); testTv.text = "சோதிக்கிறேன்…"
         thread {
             val body = JSONObject().put("contents", JSONArray().put(JSONObject().put("role", "user")
@@ -274,7 +295,7 @@ class MainActivity : Activity() {
             heardTv.text = if (on && Status.heard.isNotBlank()) "“" + Status.heard + "”" else ""
             replyTv.text = if (on) Status.reply else ""
             startBtn.text = if (on) "STOP" else "START FRIDAY"
-            errTv.text = if (p.lastError.isBlank()) "" else "கடைசி error: " + p.lastError
+            errTv.text = if (p.lastError.isBlank()) "" else "கடைசி error: " + p.lastError + "  (தொட்டா அழியும்)"
             ui.postDelayed(this, 150)
         }
     }

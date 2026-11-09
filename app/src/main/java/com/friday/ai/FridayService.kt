@@ -31,6 +31,7 @@ class FridayService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(i: Intent?, f: Int, id: Int) = START_STICKY
 
     fun isSpeaking(): Boolean = Voice.isSpeaking()
+    fun isActive(): Boolean = System.currentTimeMillis() - lastActive < 45000
     fun inTail(): Boolean = System.currentTimeMillis() - Voice.lastEnd < 350
 
     // பேசிட்டிருக்கும்போது user குறுக்கிட்டார் → உடனே நிறுத்து
@@ -77,6 +78,11 @@ class FridayService : Service(), TextToSpeech.OnInitListener {
 
     // பதிவான குரல் → Gemini (கேட்டது + பதில் ஒரே call) → வாக்கியம் வாக்கியமா பேசும்
     private fun onAudio(wav: ByteArray) {
+        if (Gemini.inCooldown()) {
+            Status.state = "listening"
+            if (System.currentTimeMillis() - lastErrShown > 30000) { lastErrShown = System.currentTimeMillis(); Overlay.show(this, null, Gemini.cooldownMsg()) }
+            return
+        }
         if (Status.state == "listening" || Status.state == "hearing") Status.state = "thinking"
         val active = System.currentTimeMillis() - lastActive < 45000
         var myGen = -1

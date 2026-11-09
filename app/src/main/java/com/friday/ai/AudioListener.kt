@@ -49,6 +49,7 @@ class AudioListener(private val svc: FridayService, private val onUtterance: (By
         var speechRun = 0
         var silence = 0
         var voiced = 0
+        var loud = 0.0
         var frames = 0
         var floor = 300.0
 
@@ -82,7 +83,7 @@ class AudioListener(private val svc: FridayService, private val onUtterance: (By
                 pre.add(buf.copyOf()); if (pre.size > 15) pre.removeAt(0)
                 if (speechRun >= need) {
                     if (speakingNow) svc.bargeIn()
-                    inSpeech = true; utter.reset(); silence = 0; voiced = speechRun; frames = 0
+                    inSpeech = true; utter.reset(); silence = 0; voiced = speechRun; loud = speechRun * rms; frames = 0
                     for (f in pre) for (s in f) { utter.write(s.toInt() and 0xFF); utter.write((s.toInt() shr 8) and 0xFF) }
                     pre.clear()
                     Status.state = "hearing"
@@ -90,10 +91,12 @@ class AudioListener(private val svc: FridayService, private val onUtterance: (By
             } else {
                 for (i in 0 until frame) { utter.write(buf[i].toInt() and 0xFF); utter.write((buf[i].toInt() shr 8) and 0xFF) }
                 frames++
-                if (speech || (svc.isSpeaking() && rms > floor * 2.0)) { silence = 0; voiced++ } else silence++
+                if (speech || (svc.isSpeaking() && rms > floor * 2.0)) { silence = 0; voiced++; loud += rms } else silence++
                 if (silence >= 35 || frames >= 750) {            // 0.7 வினாடி அமைதி (அல்லது 15 வினாடி)
                     inSpeech = false; speechRun = 0
-                    if (voiced >= 15) onUtterance(wav(utter.toByteArray()))
+                    val strict = !svc.isActive()      // உரையாடல் நடுவுல இல்லைனா: சின்ன / மெல்லிய சத்தம் Gemini-க்கு போகாது
+                    val avg = loud / maxOf(voiced, 1)
+                    if (voiced >= (if (strict) 25 else 12) && (!strict || avg > maxOf(floor * 3.0, 700.0))) onUtterance(wav(utter.toByteArray()))
                     else if (Status.state == "hearing") Status.state = "listening"
                     utter.reset()
                 }

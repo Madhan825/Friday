@@ -58,4 +58,9 @@ class Prefs(ctx: Context) {
     var liveModel: String
         get() = sp.getString("livem", "") ?: ""
         set(v) = sp.edit().putString("livem", v).apply()
+
+    // பேச்சு மொழி: tanglish (default) / english / tamil
+    var lang: String
+        get() = sp.getString("lang", "tanglish") ?: "tanglish"
+        set(v) = sp.edit().putString("lang", v).apply()
 }

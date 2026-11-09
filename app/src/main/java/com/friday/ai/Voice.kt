@@ -31,6 +31,7 @@ object Voice {
     @Volatile var onIdle: (() -> Unit)? = null
     @Volatile var fallback: ((String, () -> Unit) -> Unit)? = null
     private var started = false
+    @Volatile private var ttsCool = 0L
 
     fun isSpeaking(): Boolean = pending.get() > 0
 
@@ -92,8 +93,9 @@ object Voice {
     private fun synth(ctx: Context, text: String): Pair<ByteArray, Int>? {
         val p = Prefs(ctx)
         if (p.geminiKey.isBlank()) return null
+        if (System.currentTimeMillis() < ttsCool) return null      // quota தீர்ந்தா phone குரல்
         val prompt = "Speak in a calm, deep, refined, composed male AI-butler voice like JARVIS from Iron Man: natural pace, polite, subtly witty. " +
-            "Pronounce Tamil, English or mixed text naturally. Say exactly this: " + text.take(500)
+            "The text may be Tanglish (Tamil written in English letters): read it as natural spoken Tamil with Tamil pronunciation, not as English words; English words stay English. Say exactly this: " + text.take(500)
         val body = JSONObject()
             .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
             .put("generationConfig", JSONObject()
@@ -107,6 +109,7 @@ object Voice {
                 c.setRequestProperty("Content-Type", "application/json")
                 c.setRequestProperty("x-goog-api-key", p.geminiKey)
                 c.outputStream.use { it.write(body.toString().toByteArray()) }
+                if (c.responseCode == 429) { ttsCool = System.currentTimeMillis() + 60000; return null }
                 if (c.responseCode !in 200..299) continue
                 val parts = JSONObject(c.inputStream.bufferedReader().readText())
                     .getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts")

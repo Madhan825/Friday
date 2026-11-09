@@ -12,6 +12,24 @@ import java.util.*
 
 object Gemini {
     @Volatile var lastError = ""
+    // 429 (quota தீர்ந்தது) வந்தா கொஞ்ச நேரம் Gemini-ஐ தொந்தரவு பண்ணாம காத்திருக்கும்
+    @Volatile var quotaUntil = 0L
+    private var saw429 = false
+    private var otherFail = false
+    private var delaySec = 60.0
+    fun inCooldown(): Boolean = System.currentTimeMillis() < quotaUntil
+    fun cooldownMsg(): String = "Gemini quota mudinjiduchu. " + ((quotaUntil - System.currentTimeMillis()) / 1000 + 1) + " sec-la thirumba try pannuven (AI Studio-la billing on pannalaam)"
+    private fun resetNotes() { saw429 = false; otherFail = false; delaySec = 60.0 }
+    private fun note(code: Int, msg: String) {
+        if (code == 429) {
+            saw429 = true
+            val d = Regex("retry in (\\d+(?:\\.\\d+)?)s").find(msg)?.groupValues?.get(1)?.toDouble()
+            if (d != null) delaySec = maxOf(delaySec, d)
+        } else if (code != 400) otherFail = true
+    }
+    private fun finishNotes() {
+        if (saw429 && !otherFail) quotaUntil = System.currentTimeMillis() + (minOf(delaySec, 300.0) + 2).toLong() * 1000
+    }
     val FLASH = listOf("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash")
     val SMART = listOf("gemini-3.1-pro-preview", "gemini-2.5-pro")
 
@@ -75,6 +93,8 @@ object Gemini {
     }
 
     fun call(p: Prefs, body: JSONObject, smart: Boolean = false): String? {
+        if (inCooldown()) { lastError = cooldownMsg(); p.lastError = lastError; return null }
+        resetNotes()
         val base = if (smart) SMART + FLASH else FLASH
         val userModel = if (p.model.trim() == "gemini-2.5-flash") "" else p.model
         val first = (listOf(p.workingModel, userModel).filter { it.isNotBlank() && !smart } + base).distinct()
@@ -90,13 +110,13 @@ object Gemini {
                 r = post(p.geminiKey, m, b)
             }
             if (r.code in 200..299) { if (!smart) p.workingModel = m; p.lastError = ""; lastError = ""; return r.text }
-            errs.add(m.removePrefix("gemini-") + " " + r.code + " " + r.msg.take(60))
+            errs.add(m.removePrefix("gemini-") + " " + r.code + " " + r.msg.take(60)); note(r.code, r.msg)
             if (r.msg.contains("API key not valid", true) || r.msg.contains("API_KEY_INVALID", true) || r.msg.contains("expired", true)) fatal = true
             return null
         }
         for (m in first) { val t = attempt(m); if (t != null) return t; if (fatal) break }
         if (!fatal) for (m in discover(p.geminiKey, smart).take(4)) { val t = attempt(m); if (t != null) return t; if (fatal) break }
-        lastError = errs.joinToString(" | ").take(240)
+        finishNotes(); lastError = errs.joinToString(" | ").take(240)
         p.lastError = lastError
         return null
     }
@@ -139,6 +159,8 @@ object Gemini {
 
     // வார்த்தை வார்த்தையா (stream) பதிலை வாங்கும். முதல் வாக்கியம் வந்ததும் பேச ஆரம்பிக்கலாம்.
     fun stream(p: Prefs, body: JSONObject, smart: Boolean, cancelled: () -> Boolean, onDelta: (String) -> Unit): Boolean {
+        if (inCooldown()) { lastError = cooldownMsg(); p.lastError = lastError; return false }
+        resetNotes()
         val base = if (smart) SMART + FLASH else FLASH
         val first = (listOf(p.workingModel, p.model).filter { it.isNotBlank() && !smart } + base).distinct()
         val errs = mutableListOf<String>()
@@ -164,7 +186,7 @@ object Gemini {
                     p.lastError = ""; lastError = ""
                     return true
                 }
-                errs.add(m.removePrefix("gemini-") + " " + r.code + " " + r.msg.take(60))
+                errs.add(m.removePrefix("gemini-") + " " + r.code + " " + r.msg.take(60)); note(r.code, r.msg)
                 if (r.msg.contains("API key not valid", true) || r.msg.contains("API_KEY_INVALID", true) || r.msg.contains("expired", true)) { fatal = true; return false }
                 if (r.code != 400) return false
             }
@@ -172,7 +194,7 @@ object Gemini {
         }
         for (m in first) { if (attempt(m)) return true; if (fatal || cancelled()) break }
         if (!fatal && !cancelled()) for (m in discover(p.geminiKey, smart).take(4)) { if (attempt(m)) return true; if (fatal) break }
-        lastError = errs.joinToString(" | ").take(240)
+        finishNotes(); lastError = errs.joinToString(" | ").take(240)
         p.lastError = lastError
         return false
     }
@@ -351,13 +373,13 @@ Earlier conversation summary: ${mem.summary().ifBlank { "none" }}
             if (tags.any { t.startsWith(it) }) return
             if (t.length < 9 && tags.any { it.startsWith(t) }) return
             var start = 0
-            var min = if (emitted == 0) 10 else 30
+            var min = if (emitted == 0) 10 else 60
             for (i in s.indices) {
                 val ch = s[i]
                 if ((ch == '.' || ch == '!' || ch == '?' || ch == '।' || ch == '…') && i + 1 < s.length && s[i + 1].isWhitespace() && i + 1 - start >= min) {
                     say(s.substring(start, i + 1))
                     start = i + 1
-                    min = 30
+                    min = 60
                 }
             }
             if (start > 0) lb.delete(0, start)
@@ -367,28 +389,28 @@ Earlier conversation summary: ${mem.summary().ifBlank { "none" }}
     private fun systemPrompt(ctx: Context, mem: Memory): String {
         val now = SimpleDateFormat("EEEE, dd MMM yyyy HH:mm", Locale.ENGLISH).format(Date())
         val last = mem.lastTs()
-        val gap = if (last == 0L) "இது முதல் உரையாடல்" else "கடைசியா பேசி ${(System.currentTimeMillis() - last) / 3600000} மணி நேரம் ஆச்சு"
+        val gap = if (last == 0L) "this is the first conversation" else "last spoke " + ((System.currentTimeMillis() - last) / 3600000) + " hours ago"
         val devices = Prefs(ctx).devices().keys.joinToString(", ").ifBlank { "none" }
+        val mode = Prefs(ctx).lang
         return """
-நீ "Friday" - Iron Man-ல வர்ற மாதிரியான user-ஓட personal AI assistant, அவரோட Android phone-ல இருக்க.
-குணம்: Iron Man-ஓட JARVIS மாதிரி - அமைதியா, மரியாதையா, நாசூக்கான சின்ன நகைச்சுவையோட பேசு; அளவா "Sir" ன்னு அழை.
-யோசிக்கும் முறை: சிக்கலான கேள்வின்னா மனசுக்குள்ள படிப்படியா யோசி, தேவைன்னா Google-ல சரிபார்த்து, சரியான பதிலை சுருக்கமா சொல்லு. தெரியலைன்னா ஊகிக்காம தெரியலைன்னு சொல்லு.
-நடத்தை: ஒரு நண்பன் பேசுற மாதிரி இயல்பா, நேரடியா பதில் சொல்லு; 1-3 சின்ன வாக்கியம்; முன்னுரை, நீண்ட விளக்கம் வேண்டாம். User நடுவுல குறுக்கிட்டா அவர் புதுசா கேட்டதுக்கு நேரா பதில் சொல்லு, முன்னாடி சொன்னதை திரும்பச் சொல்லாதே.
-மொழி: user பேசுற மாதிரியே (Tamil / Tanglish / English) பதில் சொல்லு. பதில் குரல்ல படிக்கப்படும், அதனால சின்னதா, இயல்பா, emoji/markdown இல்லாம.
-தெரியாத அல்லது புதிய தகவலுக்கு Google Search பயன்படுத்தி கத்துக்கிட்டு சொல்லு.
-வேலை சொன்னா செய்: பதிலுக்குப் பிறகு தனி வரியா ACTION: {json} எழுது (பல வரி இருக்கலாம்). User பத்தி முக்கியமானது (பேரு, விருப்பம், plan) தெரிஞ்சா தனி வரியா REMEMBER: <விஷயம்> எழுது.
-ACTION வகைகள்:
+You are "Friday", a JARVIS-like personal AI assistant (from Iron Man) living on the user's Android phone. Calm, respectful, subtly witty; call the user "Sir" occasionally.
+LANGUAGE: current reply mode = $mode. Modes: tanglish = Tamil written in English letters, mixed naturally with English words (example: "Seri Sir, ippo time 4:30 aagudhu"); english = plain English; tamil = Tamil script. Default is tanglish. The user may speak Tamil, English or Tanglish: understand all of them. If the user asks to switch language (like "English-la pesu", "tamil-la pesu", "tanglish-la pesu"), confirm briefly in the new language and add the line ACTION: {"action":"language","mode":"tanglish|english|tamil"}. Even in tanglish mode, drop in a short English or Tamil phrase now and then so it sounds natural.
+SPEECH: your reply is spoken aloud. Be short, natural and direct: 1 to 3 short sentences, no lists, no markdown, no emojis, no long preamble. Talk like a friend. If the user interrupts you, answer the new thing directly and do not repeat yourself.
+THINKING: for hard questions reason step by step silently, use Google Search to verify facts you are not sure about, then answer briefly. If you do not know, say so instead of guessing.
+OUTPUT: after your spoken reply, put each phone action on its own line as ACTION: {json}. Put facts worth remembering about the user (name, preferences, plans) on their own line as REMEMBER: <fact>.
+ACTION types:
 {"action":"open_app","app":"whatsapp"} | {"action":"youtube_play","query":"song name"} | {"action":"web_search","query":"..."} | {"action":"open_url","url":"..."}
 {"action":"call","to":"contact name or number"} | {"action":"alarm","hour":6,"minute":30,"label":"..."} | {"action":"timer","seconds":300}
 {"action":"flashlight","on":true} | {"action":"volume","dir":"up|down|mute"} | {"action":"settings","page":"wifi|bluetooth|display|sound|main"}
 {"action":"type_text","text":"..."} | {"action":"tap_text","text":"button label"} | {"action":"scroll","dir":"down|up"} | {"action":"back"} | {"action":"home"}
 {"action":"send_device","device":"name","command":"natural language command"} | {"action":"wake_pc","device":"name"} | {"action":"overlay","on":true}
-வழிகாட்டி முறை: user "இதை எப்படி பண்றது" ன்னு கேட்டா ஒரே ஒரு step மட்டும் சின்னதா தெளிவா சொல்லு, கடைசியா "முடிஞ்சதும் சொல்லுங்க" ன்னு சொல்லு. User "முடிஞ்சது / அடுத்து / next" சொன்னா அடுத்த ஒரே step. எந்த step-ல இருக்கோம்ன்னு உரையாடல்ல இருந்து நினைவில வச்சுக்கோ. User சிக்கல் சொன்னா அதை சரி பண்ற step சொல்லு.
-தானே செய்யும் முறை: user "நீயே பண்ணு / நீயே பண்றியா / do it for you" சொன்னா, "சரி, நானே பண்றேன்" ன்னு சொல்லிட்டு ACTION: {"action":"do_task","goal":"<முழு இலக்கு, விவரங்களோட>"} எழுது. நடுவுல நிறுத்தச் சொன்னா ACTION: {"action":"stop_task"}.
-இணைக்கப்பட்ட devices: $devices
-இப்போ: $now ($gap)
-User பத்தி தெரிஞ்சவை: ${mem.facts().joinToString("; ").ifBlank { "இன்னும் எதுவுமில்லை" }}
-முந்தைய உரையாடல் சுருக்கம்: ${mem.summary().ifBlank { "இல்லை" }}
+{"action":"language","mode":"tanglish|english|tamil"}
+GUIDE MODE: if the user asks "how do I ...", give exactly ONE short step, then ask them to tell you when done; give the next single step when they say done / next / mudinjiduchu. Remember which step you are on from the conversation. If they hit a problem, give the step that fixes it.
+DO-IT-YOURSELF MODE: if the user says "you do it" / "neeye pannu", say a short okay and emit ACTION: {"action":"do_task","goal":"<complete goal with all details>"}. If they say stop, emit ACTION: {"action":"stop_task"}.
+Connected devices: $devices
+Now: $now ($gap)
+Known about the user: ${mem.facts().joinToString("; ").ifBlank { "nothing yet" }}
+Earlier conversation summary: ${mem.summary().ifBlank { "none" }}
 """.trimIndent()
     }
 }
